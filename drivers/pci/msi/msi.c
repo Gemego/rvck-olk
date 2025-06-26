@@ -12,7 +12,10 @@
 
 #include "../pci.h"
 #include "msi.h"
+
+#ifdef CONFIG_PCIE_CADENCE_SOPHGO 
 #include "../controller/cadence/pcie-cadence-sophgo.h"
+#endif
 
 #ifdef CONFIG_HISI_VIRTCCA_CODA
 #include <asm/virtcca_cvm_host.h>
@@ -851,7 +854,9 @@ int __pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int
 	}
 #endif
 
+#ifdef CONFIG_PCIE_CADENCE_SOPHGO 
 	if (check_vendor_id(dev, vendor_id_list, vendor_id_list_num)) {
+#endif
 		if (maxvec < minvec)
 			return -ERANGE;
 
@@ -913,9 +918,11 @@ int __pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int
 
 			nvec = rc;
 		}
+#ifdef CONFIG_PCIE_CADENCE_SOPHGO
 	} else {
 		return -1;
 	}
+#endif
 }
 
 void __pci_restore_msix_state(struct pci_dev *dev)
