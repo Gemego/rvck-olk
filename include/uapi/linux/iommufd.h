@@ -417,15 +417,32 @@ struct iommu_hwpt_arm_smmuv3 {
 };
 
 /**
+  * struct iommu_hwpt_riscv_iommu - RISCV IOMMU stage-1 device context table
+  *                                 info (IOMMU_HWPT_TYPE_RISCV_IOMMU)
+  * @dc_len: Length of device context
+  * @dc_uptr: User pointer to the address of device context
+  * @event_len: Length of an event record
+  * @out_event_uptr: User pointer to the address of event record
+  */
+struct iommu_hwpt_riscv_iommu {
+	__aligned_u64 dc_len;
+	__aligned_u64 dc_uptr;
+	__aligned_u64 event_len;
+	__aligned_u64 out_event_uptr;
+};
+
+/**
  * enum iommu_hwpt_data_type - IOMMU HWPT Data Type
  * @IOMMU_HWPT_DATA_NONE: no data
  * @IOMMU_HWPT_DATA_VTD_S1: Intel VT-d stage-1 page table
  * @IOMMU_HWPT_DATA_ARM_SMMUV3: ARM SMMUv3 Context Descriptor Table
+ * @IOMMU_HWPT_DATA_RISCV_IOMMU: RISC-V IOMMU device context table
  */
 enum iommu_hwpt_data_type {
 	IOMMU_HWPT_DATA_NONE = 0,
 	IOMMU_HWPT_DATA_VTD_S1 = 1,
 	IOMMU_HWPT_DATA_ARM_SMMUV3 = 2,
+	IOMMU_HWPT_DATA_RISCV_IOMMU = 3,
 };
 
 /**

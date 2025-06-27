@@ -858,6 +858,8 @@ static int riscv_iommu_iodir_set_mode(struct riscv_iommu_device *iommu,
 
 /* This struct contains protection domain specific IOMMU driver data. */
 struct riscv_iommu_domain {
+	struct riscv_iommu_domain *s2;
+	struct riscv_iommu_device *iommu;
 	struct iommu_domain domain;
 	struct list_head bonds;
 	spinlock_t lock;		/* protect bonds list updates. */
@@ -875,6 +877,7 @@ struct riscv_iommu_domain {
 /* Private IOMMU data for managed devices, dev_iommu_priv_* */
 struct riscv_iommu_info {
 	struct riscv_iommu_domain *domain;
+	struct riscv_iommu_dc dc_user;
 };
 
 /*
@@ -1523,7 +1526,6 @@ static int riscv_iommu_attach_blocking_domain(struct iommu_domain *iommu_domain,
 	/* Make device context invalid, translation requests will fault w/ #258 */
 	riscv_iommu_iodir_update(iommu, dev, &dc);
 	riscv_iommu_bond_unlink(info->domain, dev);
-	info->domain = NULL;
 
 	return 0;
 }
@@ -1558,6 +1560,237 @@ static struct iommu_domain riscv_iommu_identity_domain = {
 		.attach_dev = riscv_iommu_attach_identity_domain,
 	}
 };
+
+/**
+ * Nested IOMMU operations
+ */
+
+static int riscv_iommu_attach_dev_nested(struct iommu_domain *domain, struct device *dev)
+{
+	struct riscv_iommu_domain *riscv_domain = iommu_domain_to_riscv(domain);
+	struct riscv_iommu_device *iommu = dev_to_iommu(dev);
+	struct riscv_iommu_info *info = dev_iommu_priv_get(dev);
+
+	/*
+	 * Add bond to the new domain's list, but don't unlink in current domain.
+	 * We need to flush entries in stage-2 page table by iterating the list.
+	 */
+	if (riscv_iommu_bond_link(riscv_domain, dev))
+		return -ENOMEM;
+
+	riscv_iommu_iotlb_inval(riscv_domain, 0, ULONG_MAX);
+	info->dc_user.ta |= RISCV_IOMMU_PC_TA_V;
+	riscv_iommu_iodir_update(iommu, dev, &info->dc_user);
+
+	info->domain = riscv_domain;
+
+	return 0;
+}
+
+static void riscv_iommu_domain_free_nested(struct iommu_domain *domain)
+{
+	struct riscv_iommu_domain *riscv_domain = iommu_domain_to_riscv(domain);
+	struct riscv_iommu_bond *bond;
+
+	/* Unlink bond in s2 domain, because we link bond both on s1 and s2 domain */
+	list_for_each_entry_rcu(bond, &riscv_domain->s2->bonds, list)
+		riscv_iommu_bond_unlink(riscv_domain->s2, bond->dev);
+
+	if ((int)riscv_domain->pscid > 0)
+		ida_free(&riscv_iommu_pscids, riscv_domain->pscid);
+
+	kfree(riscv_domain);
+}
+
+static const struct iommu_domain_ops riscv_iommu_nested_domain_ops = {
+	.attach_dev	= riscv_iommu_attach_dev_nested,
+	.free		= riscv_iommu_domain_free_nested,
+};
+
+static int
+riscv_iommu_get_dc_user(struct device *dev, struct iommu_hwpt_riscv_iommu *user_arg)
+{
+	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	struct riscv_iommu_device *iommu = dev_to_iommu(dev);
+	struct riscv_iommu_info *info = dev_iommu_priv_get(dev);
+	struct riscv_iommu_dc dc;
+	struct riscv_iommu_fq_record event;
+	u64 dc_len = sizeof(struct riscv_iommu_dc) >>
+		     (!(iommu->caps & RISCV_IOMMU_CAPABILITIES_MSI_FLAT));
+	u64 event_len = sizeof(struct riscv_iommu_fq_record);
+	void __user *event_user = NULL;
+
+	for (int i = 0; i < fwspec->num_ids; i++) {
+		event.hdr =
+			FIELD_PREP(RISCV_IOMMU_FQ_HDR_CAUSE, RISCV_IOMMU_FQ_CAUSE_DDT_INVALID) |
+			FIELD_PREP(RISCV_IOMMU_FQ_HDR_DID, fwspec->ids[i]);
+
+		/* Sanity check DC of stage-1 from user data */
+		if (!user_arg->out_event_uptr || user_arg->event_len != event_len)
+			return -EINVAL;
+
+		event_user = u64_to_user_ptr(user_arg->out_event_uptr);
+
+		if (!user_arg->dc_uptr || user_arg->dc_len != dc_len)
+			return -EINVAL;
+
+		if (copy_from_user(&dc, u64_to_user_ptr(user_arg->dc_uptr), dc_len))
+			return -EFAULT;
+
+		if (!(dc.tc & RISCV_IOMMU_DDTE_V)) {
+			dev_dbg(dev, "Invalid DDT from user data\n");
+			if (copy_to_user(event_user, &event, event_len))
+				return -EFAULT;
+		}
+
+		if (!dc.fsc || dc.iohgatp) {
+			dev_dbg(dev, "Wrong page table from user data\n");
+			if (copy_to_user(event_user, &event, event_len))
+				return -EFAULT;
+		}
+
+		/* Save DC of stage-1 from user data */
+		memcpy(&info->dc_user,
+		       riscv_iommu_get_dc(iommu, fwspec->ids[i]),
+		       sizeof(struct riscv_iommu_dc));
+		info->dc_user.fsc = dc.fsc;
+	}
+
+	return 0;
+}
+
+static struct iommu_domain *
+riscv_iommu_domain_alloc_nested(struct device *dev,
+				struct iommu_domain *parent,
+				const struct iommu_user_data *user_data)
+{
+	struct riscv_iommu_domain *s2_domain = iommu_domain_to_riscv(parent);
+	struct riscv_iommu_domain *s1_domain;
+	struct riscv_iommu_device *iommu = dev_to_iommu(dev);
+	struct iommu_hwpt_riscv_iommu arg;
+	int ret, va_bits;
+
+	if (user_data->type != IOMMU_HWPT_DATA_RISCV_IOMMU)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	if (parent->type != IOMMU_DOMAIN_UNMANAGED)
+		return ERR_PTR(-EINVAL);
+
+	ret = iommu_copy_struct_from_user(&arg,
+					  user_data,
+					  IOMMU_HWPT_DATA_RISCV_IOMMU,
+					  out_event_uptr);
+	if (ret)
+		return ERR_PTR(ret);
+
+	s1_domain = kzalloc(sizeof(*s1_domain), GFP_KERNEL);
+	if (!s1_domain)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock_init(&s1_domain->lock);
+	INIT_LIST_HEAD_RCU(&s1_domain->bonds);
+
+	s1_domain->pscid = ida_alloc_range(&riscv_iommu_pscids, 1,
+					   RISCV_IOMMU_MAX_PSCID, GFP_KERNEL);
+	if (s1_domain->pscid < 0) {
+		iommu_free_page(s1_domain->pgd_root);
+		kfree(s1_domain);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	/* Get device context of stage-1 from user*/
+	ret = riscv_iommu_get_dc_user(dev, &arg);
+	if (ret) {
+		kfree(s1_domain);
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!iommu) {
+		va_bits = VA_BITS;
+	} else if (iommu->caps & RISCV_IOMMU_CAPABILITIES_SV57) {
+		va_bits = 57;
+	} else if (iommu->caps & RISCV_IOMMU_CAPABILITIES_SV48) {
+		va_bits = 48;
+	} else if (iommu->caps & RISCV_IOMMU_CAPABILITIES_SV39) {
+		va_bits = 39;
+	} else {
+		dev_err(dev, "cannot find supported page table mode\n");
+		return ERR_PTR(-ENODEV);
+	}
+
+	/*
+	 * The ops->domain_alloc_user could be directly called by the iommufd core,
+	 * instead of iommu core. So, this function need to set the default value of
+	 * following data member:
+	 *  - domain->pgsize_bitmap
+	 *  - domain->geometry
+	 *  - domain->type
+	 *  - domain->ops
+	 */
+	s1_domain->s2 = s2_domain;
+	s1_domain->iommu = iommu;
+	s1_domain->domain.type = IOMMU_DOMAIN_NESTED;
+	s1_domain->domain.ops = &riscv_iommu_nested_domain_ops;
+	s1_domain->domain.pgsize_bitmap = SZ_4K;
+	s1_domain->domain.geometry.aperture_start = 0;
+	s1_domain->domain.geometry.aperture_end = DMA_BIT_MASK(va_bits - 1);
+	s1_domain->domain.geometry.force_aperture = true;
+
+	return &s1_domain->domain;
+}
+
+static struct iommu_domain *
+riscv_iommu_domain_alloc_user(struct device *dev, u32 flags,
+			      struct iommu_domain *parent,
+			      const struct iommu_user_data *user_data)
+{
+	struct iommu_domain *domain;
+	struct riscv_iommu_domain *riscv_domain;
+
+	/* Allocate stage-1 domain if it has stage-2 parent domain */
+	if (parent)
+		return riscv_iommu_domain_alloc_nested(dev, parent, user_data);
+
+	if (flags & ~((IOMMU_HWPT_ALLOC_NEST_PARENT | IOMMU_HWPT_ALLOC_DIRTY_TRACKING)))
+		return ERR_PTR(-EOPNOTSUPP);
+
+	if (user_data)
+		return ERR_PTR(-EINVAL);
+
+	/* domain_alloc_user op needs to be fully initialized */
+	domain = iommu_domain_alloc(dev->bus);
+	if (!domain)
+		return ERR_PTR(-ENOMEM);
+
+	/*
+	 * We assume that nest-parent or g-stage only will come here
+	 * TODO: Shadow page table doesn't be supported now.
+	 *       We currently can't distinguish g-stage and shadow
+	 *       page table here. Shadow page table shouldn't be
+	 *       put at stage-2.
+	 */
+	riscv_domain = iommu_domain_to_riscv(domain);
+
+	/* pgd_root may be allocated in .domain_alloc_paging */
+	if (riscv_domain->pgd_root)
+		iommu_free_page(riscv_domain->pgd_root);
+
+	riscv_domain->pgd_root = iommu_alloc_pages_node(riscv_domain->numa_node,
+							GFP_KERNEL_ACCOUNT,
+							2);
+	if (!riscv_domain->pgd_root)
+		return ERR_PTR(-ENOMEM);
+
+	riscv_domain->gscid = ida_alloc_range(&riscv_iommu_gscids, 1,
+					      RISCV_IOMMU_MAX_GSCID, GFP_KERNEL);
+	if (riscv_domain->gscid < 0) {
+		iommu_free_pages(riscv_domain->pgd_root, 2);
+		kfree(riscv_domain);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	return domain;
+}
 
 static void *riscv_iommu_hw_info(struct device *dev, u32 *length, u32 *type)
 {
@@ -1653,6 +1886,7 @@ static const struct iommu_ops riscv_iommu_ops = {
 	.blocked_domain = &riscv_iommu_blocking_domain,
 	.release_domain = &riscv_iommu_blocking_domain,
 	.domain_alloc_paging = riscv_iommu_alloc_paging_domain,
+	.domain_alloc_user = riscv_iommu_domain_alloc_user,
 	.device_group = riscv_iommu_device_group,
 	.probe_device = riscv_iommu_probe_device,
 	.release_device	= riscv_iommu_release_device,
