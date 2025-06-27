@@ -1578,8 +1578,9 @@ static int riscv_iommu_attach_dev_nested(struct iommu_domain *domain, struct dev
 	if (riscv_iommu_bond_link(riscv_domain, dev))
 		return -ENOMEM;
 
-	riscv_iommu_iotlb_inval(riscv_domain, 0, ULONG_MAX);
-	info->dc_user.ta |= RISCV_IOMMU_PC_TA_V;
+	if (riscv_iommu_bond_link(info->domain, dev))
+		return -ENOMEM;
+
 	riscv_iommu_iodir_update(iommu, dev, &info->dc_user);
 
 	info->domain = riscv_domain;
@@ -1602,13 +1603,92 @@ static void riscv_iommu_domain_free_nested(struct iommu_domain *domain)
 	kfree(riscv_domain);
 }
 
+static int riscv_iommu_fix_user_cmd(struct riscv_iommu_command *cmd,
+				    unsigned int pscid, unsigned int gscid)
+{
+	u32 opcode = FIELD_GET(RISCV_IOMMU_CMD_OPCODE, cmd->dword0);
+
+	switch (opcode) {
+	case RISCV_IOMMU_CMD_IOTINVAL_OPCODE:
+		u32 func = FIELD_GET(RISCV_IOMMU_CMD_FUNC, cmd->dword0);
+
+		if (func != RISCV_IOMMU_CMD_IOTINVAL_FUNC_GVMA &&
+		    func != RISCV_IOMMU_CMD_IOTINVAL_FUNC_VMA) {
+			pr_warn("The IOTINVAL function: 0x%x is not supported\n",
+				func);
+			return -EOPNOTSUPP;
+		}
+
+		if (func == RISCV_IOMMU_CMD_IOTINVAL_FUNC_GVMA) {
+			cmd->dword0 &= ~RISCV_IOMMU_CMD_FUNC;
+			cmd->dword0 |= FIELD_PREP(RISCV_IOMMU_CMD_FUNC,
+						  RISCV_IOMMU_CMD_IOTINVAL_FUNC_VMA);
+		}
+
+		cmd->dword0 &= ~(RISCV_IOMMU_CMD_IOTINVAL_PSCID |
+				 RISCV_IOMMU_CMD_IOTINVAL_GSCID);
+		riscv_iommu_cmd_inval_set_pscid(cmd, pscid);
+		riscv_iommu_cmd_inval_set_gscid(cmd, gscid);
+		break;
+	case RISCV_IOMMU_CMD_IODIR_OPCODE:
+		/*
+		 * Ensure the device ID is right. We expect that VMM has
+		 * transferred the device ID to host's from guest's.
+		 */
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+static int riscv_iommu_cache_invalidate_user(struct iommu_domain *domain,
+					     struct iommu_user_data_array *array)
+{
+	struct riscv_iommu_domain *riscv_domain = iommu_domain_to_riscv(domain);
+	struct iommu_hwpt_riscv_iommu_invalidate inv_info;
+	int ret, index;
+
+	if (array->type != IOMMU_HWPT_INVALIDATE_DATA_RISCV_IOMMU) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	for (index = 0; index < array->entry_num; index++) {
+		ret = iommu_copy_struct_from_user_array(&inv_info, array,
+							IOMMU_HWPT_INVALIDATE_DATA_RISCV_IOMMU,
+							index, cmd);
+		if (ret)
+			break;
+
+		ret = riscv_iommu_fix_user_cmd((struct riscv_iommu_command *)inv_info.cmd,
+					       riscv_domain->pscid,
+					       riscv_domain->s2->gscid);
+		if (ret == -EOPNOTSUPP)
+			continue;
+
+		riscv_iommu_cmd_send(riscv_domain->iommu,
+				     (struct riscv_iommu_command *)inv_info.cmd);
+		riscv_iommu_cmd_sync(riscv_domain->iommu,
+				     RISCV_IOMMU_IOTINVAL_TIMEOUT);
+	}
+
+out:
+	array->entry_num = index;
+
+	return ret;
+}
+
 static const struct iommu_domain_ops riscv_iommu_nested_domain_ops = {
 	.attach_dev	= riscv_iommu_attach_dev_nested,
 	.free		= riscv_iommu_domain_free_nested,
+	.cache_invalidate_user = riscv_iommu_cache_invalidate_user,
 };
 
 static int
-riscv_iommu_get_dc_user(struct device *dev, struct iommu_hwpt_riscv_iommu *user_arg)
+riscv_iommu_get_dc_user(struct device *dev, struct iommu_hwpt_riscv_iommu *user_arg,
+			struct riscv_iommu_domain *s1_domain)
 {
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct riscv_iommu_device *iommu = dev_to_iommu(dev);
@@ -1654,6 +1734,8 @@ riscv_iommu_get_dc_user(struct device *dev, struct iommu_hwpt_riscv_iommu *user_
 		       riscv_iommu_get_dc(iommu, fwspec->ids[i]),
 		       sizeof(struct riscv_iommu_dc));
 		info->dc_user.fsc = dc.fsc;
+		info->dc_user.ta = FIELD_PREP(RISCV_IOMMU_PC_TA_PSCID, s1_domain->pscid) |
+					      RISCV_IOMMU_PC_TA_V;
 	}
 
 	return 0;
@@ -1699,7 +1781,7 @@ riscv_iommu_domain_alloc_nested(struct device *dev,
 	}
 
 	/* Get device context of stage-1 from user*/
-	ret = riscv_iommu_get_dc_user(dev, &arg);
+	ret = riscv_iommu_get_dc_user(dev, &arg, s1_domain);
 	if (ret) {
 		kfree(s1_domain);
 		return ERR_PTR(-EINVAL);
