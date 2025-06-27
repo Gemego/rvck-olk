@@ -1127,6 +1127,16 @@ static void riscv_iommu_iotlb_sync(struct iommu_domain *iommu_domain,
 	riscv_iommu_iotlb_inval(domain, gather->start, gather->end);
 }
 
+static int riscv_iommu_iotlb_sync_map(struct iommu_domain *iommu_domain,
+				      unsigned long iova, size_t size)
+{
+	struct riscv_iommu_domain *domain = iommu_domain_to_riscv(iommu_domain);
+
+	riscv_iommu_iotlb_inval(domain, iova, iova + size - 1);
+
+	return 0;
+}
+
 #define PT_SHIFT (PAGE_SHIFT - ilog2(sizeof(pte_t)))
 
 #define _io_pte_present(pte)	((pte) & (_PAGE_PRESENT | _PAGE_PROT_NONE))
@@ -1398,6 +1408,7 @@ static const struct iommu_domain_ops riscv_iommu_paging_domain_ops = {
 	.unmap_pages = riscv_iommu_unmap_pages,
 	.iova_to_phys = riscv_iommu_iova_to_phys,
 	.iotlb_sync = riscv_iommu_iotlb_sync,
+	.iotlb_sync_map = riscv_iommu_iotlb_sync_map,
 	.flush_iotlb_all = riscv_iommu_iotlb_flush_all,
 };
 
