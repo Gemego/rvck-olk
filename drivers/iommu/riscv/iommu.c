@@ -1680,10 +1680,22 @@ out:
 	return ret;
 }
 
+static struct iommu_domain *
+riscv_iommu_get_msi_mapping_domain(struct iommu_domain *domain)
+{
+	struct riscv_iommu_domain *riscv_domain = iommu_domain_to_riscv(domain);
+
+	if (riscv_domain->s2)
+		return &riscv_domain->s2->domain;
+
+	return domain;
+}
+
 static const struct iommu_domain_ops riscv_iommu_nested_domain_ops = {
 	.attach_dev	= riscv_iommu_attach_dev_nested,
 	.free		= riscv_iommu_domain_free_nested,
 	.cache_invalidate_user = riscv_iommu_cache_invalidate_user,
+	.get_msi_mapping_domain = riscv_iommu_get_msi_mapping_domain,
 };
 
 static int
