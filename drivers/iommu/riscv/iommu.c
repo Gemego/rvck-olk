@@ -1680,10 +1680,22 @@ out:
 	return ret;
 }
 
+static struct iommu_domain *
+riscv_iommu_get_msi_mapping_domain(struct iommu_domain *domain)
+{
+	struct riscv_iommu_domain *riscv_domain = iommu_domain_to_riscv(domain);
+
+	if (riscv_domain->s2)
+		return &riscv_domain->s2->domain;
+
+	return domain;
+}
+
 static const struct iommu_domain_ops riscv_iommu_nested_domain_ops = {
 	.attach_dev	= riscv_iommu_attach_dev_nested,
 	.free		= riscv_iommu_domain_free_nested,
 	.cache_invalidate_user = riscv_iommu_cache_invalidate_user,
+	.get_msi_mapping_domain = riscv_iommu_get_msi_mapping_domain,
 };
 
 static int
@@ -2037,7 +2049,7 @@ void riscv_iommu_remove(struct riscv_iommu_device *iommu)
 	riscv_iommu_queue_disable(&iommu->fltq);
 
 	if (iommu->caps & RISCV_IOMMU_CAPABILITIES_HPM)
-+		riscv_iommu_pmu_uninit(&iommu->pmu);
+		riscv_iommu_pmu_uninit(&iommu->pmu);
 }
 
 int riscv_iommu_init(struct riscv_iommu_device *iommu)
