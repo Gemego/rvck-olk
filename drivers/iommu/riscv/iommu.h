@@ -135,6 +135,9 @@ int riscv_iommu_pmu_init(struct riscv_iommu_pmu *pmu, void __iomem *reg,
 void riscv_iommu_pmu_uninit(struct riscv_iommu_pmu *pmu);
 irqreturn_t riscv_iommu_pmu_handle_irq(struct riscv_iommu_pmu *pmu);
 
+struct riscv_iommu_dc *riscv_iommu_get_dc(struct riscv_iommu_device *iommu,
+					  unsigned int devid);
+
 void riscv_iommu_cmd_send(struct riscv_iommu_device *iommu,
 			  struct riscv_iommu_command *cmd);
 void riscv_iommu_cmd_sync(struct riscv_iommu_device *iommu,
