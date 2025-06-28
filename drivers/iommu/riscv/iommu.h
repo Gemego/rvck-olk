@@ -31,6 +31,8 @@ struct riscv_iommu_msiptp_state {
 
 /* This struct contains protection domain specific IOMMU driver data. */
 struct riscv_iommu_domain {
+	struct riscv_iommu_domain *s2;
+	struct riscv_iommu_device *iommu;
 	struct iommu_domain domain;
 	struct list_head bonds;
 	spinlock_t lock;			/* protect bonds list updates. */
@@ -52,6 +54,7 @@ struct riscv_iommu_domain {
 /* Private IOMMU data for managed devices, dev_iommu_priv_* */
 struct riscv_iommu_info {
 	struct riscv_iommu_domain *domain;
+	struct riscv_iommu_dc dc_user;
 };
 
 struct riscv_iommu_device;

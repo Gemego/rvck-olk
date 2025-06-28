@@ -1495,7 +1495,6 @@ static int riscv_iommu_attach_blocking_domain(struct iommu_domain *iommu_domain,
 	
 	riscv_iommu_irq_domain_unlink(info->domain, dev);
 	riscv_iommu_bond_unlink(info->domain, dev);
-	info->domain = NULL;
 
 	return 0;
 }
