@@ -1212,6 +1212,7 @@ static struct group_device *iommu_group_alloc_device(struct iommu_group *group,
 		return ERR_PTR(-ENOMEM);
 
 	device->dev = dev;
+	INIT_LIST_HEAD(&device->list);
 
 	ret = sysfs_create_link(&dev->kobj, &group->kobj, "iommu_group");
 	if (ret)
@@ -1671,7 +1672,7 @@ iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
 	 * domain. Do not use in new drivers.
 	 */
 	if (ops->default_domain) {
-		if (req_type != ops->default_domain->type)
+		if (ops->default_domain->type && req_type != ops->default_domain->type)
 			return ERR_PTR(-EINVAL);
 		return ops->default_domain;
 	}
