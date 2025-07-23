@@ -46,7 +46,7 @@ static int iommufd_fault_iopf_enable(struct iommufd_device *idev)
 	if (ret)
 		--idev->iopf_enabled;
 
-#ifndef CONFIG_RISCV_IOMMU
+#ifdef CONFIG_ARM_SMMU_V3
 	ret = iommu_dev_enable_feature(dev, IOMMU_DEV_FEAT_SVA);
 	if (ret)
 		return ret;
