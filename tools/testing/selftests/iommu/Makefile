@@ -7,5 +7,6 @@ CFLAGS += -D_GNU_SOURCE
 TEST_GEN_PROGS :=
 TEST_GEN_PROGS += iommufd
 TEST_GEN_PROGS += iommufd_fail_nth
+TEST_GEN_PROGS += iommufd_tailed
 
 include ../lib.mk
